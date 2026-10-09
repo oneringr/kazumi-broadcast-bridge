@@ -31,16 +31,20 @@ class HlsDownloadCache internal constructor(
         val maxBytes: Long,
         val otherBytes: () -> Long = { 0 },
         val reserveFreeBytes: Long = 128L * 1024 * 1024,
-        val diagnostic: (String) -> Unit = {}
+        val diagnostic: (String) -> Unit = {},
+        val storage: CacheStorage = CacheStorage.DISK,
+        val memoryBudget: MemoryBudget? = null,
+        val memoryFactory: MemoryChunkFactory = HeapMemoryChunkFactory
     )
 
     /** URL-free outcomes; totalBytes includes bytes received on incomplete/retried attempts. */
     data class Stats(val registered: Int, val completed: Int, val failed: Int, val totalBytes: Long,
         val peakActive: Int, val active: Int, val pending: Int)
 
-    internal class Resource(val source: String, val path: String, val file: File) {
+    internal class Resource(val source: String, val path: String, val file: File,
+        val memory: MemoryMediaBuffer? = null) {
         val partial = File(file.parentFile, "${file.name}.part")
-        var task: FutureTask<File>? = null
+        var task: FutureTask<Resource>? = null
         var accounted = 0L
         var completed = false
         var failed = false
@@ -72,9 +76,13 @@ class HlsDownloadCache internal constructor(
     }
 
     init {
-        require(options.parallelism in setOf(1, 2, 4, 8)) { "HLS 下载并发数必须为 1、2、4 或 8。" }
+        require(options.parallelism in setOf(1, 2, 4, 8, 16, 32)) { "HLS 下载并发数必须为 1、2、4、8、16 或 32。" }
         require(options.maxBytes > 0 && options.reserveFreeBytes >= 0) { "HLS 缓存限额无效。" }
-        check((options.directory.isDirectory || options.directory.mkdirs()) && directory.mkdir()) { "无法创建 HLS 分片缓存。" }
+        if (options.storage == CacheStorage.MEMORY) {
+            requireNotNull(options.memoryBudget) { "内存缓存需要共享内存限额。" }
+        } else {
+            check((options.directory.isDirectory || options.directory.mkdirs()) && directory.mkdir()) { "无法创建 HLS 分片缓存。" }
+        }
     }
 
     internal fun register(source: String): Resource = synchronized(lock) {
@@ -88,7 +96,9 @@ class HlsDownloadCache internal constructor(
         val suffix = uri.path.orEmpty().substringAfterLast('/').substringAfterLast('.', "bin")
             .takeIf { it.length in 1..12 && it.all(Char::isLetterOrDigit) } ?: "bin"
         val name = "${resources.size}.$suffix"
-        Resource(source, "/$name", File(directory, name)).also { resources[source] = it }
+        val memory = if (options.storage == CacheStorage.MEMORY)
+            MemoryMediaBuffer(requireNotNull(options.memoryBudget), options.memoryFactory) else null
+        Resource(source, "/$name", File(directory, name), memory).also { resources[source] = it }
     }
 
     internal fun playlist(items: List<Resource>) = synchronized(lock) {
@@ -102,18 +112,19 @@ class HlsDownloadCache internal constructor(
     private fun checkActive() {
         if (closed || canceled() || Thread.currentThread().isInterrupted) throw CancellationException("投屏已停止。")
         failure?.let { throw CacheFailure(it) }
+        options.memoryBudget?.failure?.let { throw CacheFailure(it) }
     }
 
-    private fun schedule(resource: Resource): FutureTask<File> = synchronized(lock) {
+    private fun schedule(resource: Resource): FutureTask<Resource> = synchronized(lock) {
         checkActive()
         resource.task?.let { return@synchronized it }
-        FutureTask<File> { download(resource) }.also { task ->
+        FutureTask<Resource> { download(resource) }.also { task ->
             resource.task = task
             workers.execute(task)
         }
     }
 
-    private fun acquire(resource: Resource, prefetch: Boolean): File {
+    private fun acquire(resource: Resource, prefetch: Boolean): Resource {
         val task = schedule(resource)
         if (prefetch) {
             val plan = synchronized(lock) { resource.lookahead }
@@ -130,15 +141,19 @@ class HlsDownloadCache internal constructor(
             } catch (_: TimeoutException) {
                 // Recheck cancellation even for a queued resource canceled during shutdown.
             } catch (_: ExecutionException) {
-                throw CacheFailure(failure ?: "HLS 媒体资源下载失败。")
+                throw CacheFailure(failure ?: options.memoryBudget?.failure ?: "HLS 媒体资源下载失败。")
+            } catch (error: CancellationException) {
+                // A failed download cancels its own FutureTask; preserve the actual failure reason.
+                checkActive()
+                throw error
             }
         }
     }
 
     internal fun serve(resource: Resource, request: HttpRequest, output: OutputStream) {
         val head = request.method == "HEAD"
-        val file = acquire(resource, prefetch = !head)
-        val size = file.length()
+        val cached = acquire(resource, prefetch = !head)
+        val size = cached.memory?.length ?: cached.file.length()
         val range = ByteRanges.parse(request.header("range"), size)
         if (range == RangeResult.Invalid) {
             HttpResponse(416, "Range Not Satisfiable", mapOf("content-range" to "bytes */$size")).writeTo(output, head)
@@ -150,16 +165,30 @@ class HlsDownloadCache internal constructor(
             if (range is RangeResult.Partial) mapOf("content-range" to "bytes ${selection.start}-${selection.end}/$size") else emptyMap()
         HttpResponse(if (range is RangeResult.Partial) 206 else 200,
             if (range is RangeResult.Partial) "Partial Content" else "OK", responseHeaders).writeTo(output, true)
-        if (!head) RandomAccessFile(file, "r").use { input ->
-            input.seek(selection.start)
-            var remaining = selection.length
-            val buffer = ByteArray(65536)
-            while (remaining > 0) {
-                checkActive()
-                val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                if (count < 0) throw CacheFailure("HLS 分片缓存不完整。")
-                output.write(buffer, 0, count)
-                remaining -= count
+        if (!head) {
+            if (cached.memory != null) {
+                var offset = selection.start
+                var remaining = selection.length
+                val buffer = ByteArray(65536)
+                while (remaining > 0) {
+                    checkActive()
+                    val count = cached.memory.read(offset, buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (count <= 0) throw CacheFailure("HLS 分片缓存不完整。")
+                    output.write(buffer, 0, count)
+                    offset += count
+                    remaining -= count
+                }
+            } else RandomAccessFile(cached.file, "r").use { input ->
+                input.seek(selection.start)
+                var remaining = selection.length
+                val buffer = ByteArray(65536)
+                while (remaining > 0) {
+                    checkActive()
+                    val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (count < 0) throw CacheFailure("HLS 分片缓存不完整。")
+                    output.write(buffer, 0, count)
+                    remaining -= count
+                }
             }
         }
         output.flush()
@@ -167,20 +196,27 @@ class HlsDownloadCache internal constructor(
 
     private fun reserve(resource: Resource, count: Int) = synchronized(lock) {
         checkActive()
-        val other = options.otherBytes().coerceAtLeast(0)
-        if (other > options.maxBytes || used > options.maxBytes - other - count) {
-            throw CacheFailure("HLS 分片与视频缓存合计已达到设定上限。")
-        }
-        if (directory.usableSpace < options.reserveFreeBytes + count) {
-            throw CacheFailure("手机存储剩余空间不足，已停止 HLS 下载。")
+        if (options.storage == CacheStorage.DISK) {
+            val other = options.otherBytes().coerceAtLeast(0)
+            if (other > options.maxBytes || used > options.maxBytes - other - count) {
+                throw CacheFailure("HLS 分片与视频缓存合计已达到设定上限。")
+            }
+            if (directory.usableSpace < options.reserveFreeBytes + count) {
+                throw CacheFailure("手机存储剩余空间不足，已停止 HLS 下载。")
+            }
         }
         resource.accounted += count
         used += count
     }
 
     private fun discard(resource: Resource) {
-        resource.partial.delete()
-        resource.file.delete()
+        if (resource.memory != null) {
+            // A concurrent close may finish between the closed check and reset.
+            runCatching { if (closed) resource.memory.close() else resource.memory.reset() }
+        } else {
+            resource.partial.delete()
+            resource.file.delete()
+        }
         synchronized(lock) { used -= resource.accounted; resource.accounted = 0 }
     }
 
@@ -213,7 +249,7 @@ class HlsDownloadCache internal constructor(
         return target.toASCIIString()
     }
 
-    private fun downloadAttempt(resource: Resource): File {
+    private fun downloadAttempt(resource: Resource): Resource {
         var source = resource.source
         for (redirect in 0..5) {
             checkActive()
@@ -233,8 +269,11 @@ class HlsDownloadCache internal constructor(
                     throw HttpFailure(status, delay)
                 }
                 val expected = active.contentLengthLong
+                if (resource.memory != null && expected >= requireNotNull(options.memoryBudget).limitBytes) {
+                    throw CacheFailure("内存缓存达到设定阈值，已停止 HLS 下载。")
+                }
                 active.inputStream.use { input ->
-                    val output = synchronized(lock) {
+                    val output = if (resource.memory != null) null else synchronized(lock) {
                         checkActive()
                         FileOutputStream(resource.partial).also(outputs::add)
                     }
@@ -248,26 +287,27 @@ class HlsDownloadCache internal constructor(
                             if (count == 0) continue
                             synchronized(lock) { totalBytes += count }
                             reserve(resource, count)
-                            output.write(buffer, 0, count)
+                            if (resource.memory != null) resource.memory.write(received, buffer, 0, count)
+                            else output!!.write(buffer, 0, count)
                             received += count
                         }
                         if (expected >= 0 && received != expected) throw IOException("Truncated HLS resource")
                         if (received == 0L) throw CacheFailure("HLS 媒体资源为空。")
                     } finally {
-                        outputs.remove(output)
-                        output.close()
+                        output?.let { outputs.remove(it); it.close() }
                     }
                 }
                 checkActive()
-                // Completed resources appear atomically; clients never receive a partial download.
-                try {
-                    Files.move(resource.partial.toPath(), resource.file.toPath(), StandardCopyOption.ATOMIC_MOVE)
-                } catch (_: AtomicMoveNotSupportedException) {
-                    // A resource stays unavailable until this task completes, including this fallback.
-                    Files.move(resource.partial.toPath(), resource.file.toPath())
+                // Both backends stay unavailable until the entire resource task completes.
+                if (resource.memory == null) {
+                    try {
+                        Files.move(resource.partial.toPath(), resource.file.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    } catch (_: AtomicMoveNotSupportedException) {
+                        Files.move(resource.partial.toPath(), resource.file.toPath())
+                    }
                 }
                 checkActive()
-                return resource.file
+                return resource
             } finally {
                 connections.remove(active)
                 active.disconnect()
@@ -276,7 +316,7 @@ class HlsDownloadCache internal constructor(
         throw CacheFailure("HLS 资源重定向次数超过上限。")
     }
 
-    private fun download(resource: Resource): File {
+    private fun download(resource: Resource): Resource {
         synchronized(lock) {
             checkActive()
             active++
@@ -290,9 +330,10 @@ class HlsDownloadCache internal constructor(
                 } catch (error: Exception) {
                     discard(resource)
                     checkActive()
-                    val retryable = when (error) {
-                        is HttpFailure -> error.status == 429 || error.status in 500..599
-                        is CacheFailure, is CancellationException, is IllegalArgumentException -> false
+                    val retryable = when {
+                        resource.memory != null && error.message.orEmpty().startsWith("内存缓存") -> false
+                        error is HttpFailure -> error.status == 429 || error.status in 500..599
+                        error is CacheFailure || error is CancellationException || error is IllegalArgumentException -> false
                         else -> error is IOException
                     }
                     if (!retryable || attempt == 2) throw error
@@ -305,17 +346,18 @@ class HlsDownloadCache internal constructor(
             throw CacheFailure("HLS 媒体资源下载失败。")
         } catch (error: Exception) {
             if (!closed && !canceled() && error !is CancellationException && failure == null) {
-                fail(resource, when (error) {
+                fail(resource, options.memoryBudget?.failure ?: when (error) {
                     is HttpFailure -> "HLS 媒体资源返回 HTTP ${error.status}，已停止转换。"
                     is CacheFailure -> error.message ?: "HLS 媒体资源下载失败。"
-                    else -> "HLS 媒体资源下载失败（${error.javaClass.simpleName}）。"
+                    else -> if (resource.memory != null && error.message.orEmpty().startsWith("内存缓存")) error.message!!
+                        else "HLS 媒体资源下载失败（${error.javaClass.simpleName}）。"
                 })
             }
             throw error
         } finally {
             synchronized(lock) { active-- }
             if (closed || canceled() || failure != null) discard(resource)
-            if (closed) directory.delete()
+            if (closed && options.storage == CacheStorage.DISK) directory.delete()
         }
     }
 
@@ -335,13 +377,14 @@ class HlsDownloadCache internal constructor(
         // Output handles close before waiting, allowing immediate cleanup even if an HTTP read stalls.
         runCatching { workers.awaitTermination(2, TimeUnit.SECONDS) }
         synchronized(lock) { resources.values.toList() }.forEach(::discard)
-        directory.delete()
+        if (options.storage == CacheStorage.DISK) directory.delete()
         diagnostic("HLS download close: $stats")
     }
 
     private fun interruptTransfers() {
-        synchronized(lock) { outputs.toList() }.forEach { runCatching { it.close() } }
-        val active = connections.toList()
+        // CHM toArray tolerates concurrent removals; toList's size-one fast path does not.
+        outputs.toTypedArray().forEach { runCatching { it.close() } }
+        val active = connections.toTypedArray()
         if (active.isNotEmpty()) Thread({
             active.forEach { runCatching { it.disconnect() } }
         }, "KazumiBridge-HLS-disconnect").apply { isDaemon = true; start() }

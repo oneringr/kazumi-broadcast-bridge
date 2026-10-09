@@ -60,7 +60,7 @@ object MediaPolicy {
         return false
     }
 
-    fun arguments(input: String, output: String, plan: ConversionPlan, mode: CastMode, inputOptions: List<String> = emptyList(), logLevel: String = "error"): List<String> = buildList {
+    fun arguments(input: String, output: String, plan: ConversionPlan, mode: CastMode, inputOptions: List<String> = emptyList(), logLevel: String = "error", moovReserveBytes: Int? = null): List<String> = buildList {
         require(logLevel in setOf("error", "warning"))
         addAll(listOf("-hide_banner", "-loglevel", logLevel, "-y"))
         addAll(inputOptions)
@@ -70,7 +70,12 @@ object MediaPolicy {
             "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "30"))
         if (plan.copyAudio) addAll(listOf("-c:a", "copy")) else addAll(listOf("-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000"))
         if (plan.copyAudio && plan.stripAdts) addAll(listOf("-bsf:a", "aac_adtstoasc"))
-        if (mode == CastMode.COMPLETE) addAll(listOf("-movflags", "+faststart")) else addAll(listOf(
+        if (mode == CastMode.COMPLETE) {
+            if (moovReserveBytes != null) {
+                require(moovReserveBytes > 0) { "MP4 索引预留空间必须大于零。" }
+                addAll(listOf("-moov_size", moovReserveBytes.toString()))
+            } else addAll(listOf("-movflags", "+faststart"))
+        } else addAll(listOf(
             "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-flush_packets", "1"))
         addAll(listOf("-f", "mp4", output))
     }
@@ -79,23 +84,54 @@ object MediaPolicy {
         if (!file.isFile) return false
         return runCatching {
             RandomAccessFile(file, "r").use { input ->
-                val length = input.length()
-                var offset = 0L
-                var ftyp = false
-                var moov = false
-                var moof = false
-                while (offset + 8 <= length) {
+                fragmentedReady(input.length()) { offset, bytes ->
                     input.seek(offset)
-                    var size = input.readInt().toLong() and 0xffffffffL
-                    val type = ByteArray(4).also(input::readFully).toString(Charsets.US_ASCII)
-                    var header = 8L
-                    if (size == 1L) { if (offset + 16 > length) break; size = input.readLong(); header = 16 }
-                    if (size < header || size > length - offset) break
-                    when (type) { "ftyp" -> ftyp = true; "moov" -> moov = true; "moof" -> moof = true; "mdat" -> if (ftyp && moov && moof) return@use true }
-                    offset += size
+                    input.read(bytes)
                 }
-                false
             }
         }.getOrDefault(false)
     }
+
+    /** Reads box headers only, so RAM output never needs a duplicate of the full media. */
+    fun fragmentedReady(length: Long, read: (offset: Long, data: ByteArray) -> Int): Boolean = runCatching {
+        fun exact(offset: Long, count: Int): ByteArray? {
+            val bytes = ByteArray(count)
+            var done = 0
+            while (done < count) {
+                val target = if (done == 0) bytes else ByteArray(count - done)
+                val received = read(offset + done, target)
+                if (received <= 0 || received > target.size) return null
+                if (target !== bytes) target.copyInto(bytes, done, 0, received)
+                done += received
+            }
+            return bytes
+        }
+        fun unsigned(bytes: ByteArray, offset: Int, count: Int): Long =
+            (offset until offset + count).fold(0L) { value, index -> (value shl 8) or (bytes[index].toLong() and 255) }
+        if (length < 8) return@runCatching false
+        var offset = 0L
+        var ftyp = false
+        var moov = false
+        var moof = false
+        while (offset <= length - 8) {
+            val bytes = exact(offset, 8) ?: break
+            var size = unsigned(bytes, 0, 4)
+            val type = String(bytes, 4, 4, Charsets.US_ASCII)
+            var header = 8L
+            if (size == 1L) {
+                if (offset > length - 16) break
+                size = unsigned(exact(offset + 8, 8) ?: break, 0, 8)
+                header = 16
+            }
+            if (size < header || size > length - offset) break
+            when (type) {
+                "ftyp" -> ftyp = true
+                "moov" -> moov = true
+                "moof" -> moof = true
+                "mdat" -> if (ftyp && moov && moof) return@runCatching true
+            }
+            offset += size
+        }
+        false
+    }.getOrDefault(false)
 }

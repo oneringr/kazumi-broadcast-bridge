@@ -69,7 +69,11 @@ class RendererController(private val engine: MediaEngine, private val media: Med
                             }
                         } },
                         failed = { message -> renderer.lock.withLock {
-                            if (renderer.gate.current(generation)) { renderer.gate.fail(generation); renderer.job?.cancel(); renderer.job?.let(media::remove); onActive(false); BridgeState.error(message) }
+                            if (renderer.gate.current(generation)) {
+                                renderer.gate.fail(generation); renderer.job?.cancel(); renderer.job?.let(media::remove); onActive(false)
+                                BridgeState.update { it.copy(memoryCacheBytes = 0) }
+                                BridgeState.error(message)
+                            }
                         } })
                     renderer.arrived.signalAll()
                     BridgeState.event("截获投屏请求；等待视频准备完成")
@@ -87,7 +91,7 @@ class RendererController(private val engine: MediaEngine, private val media: Med
                     renderer.job?.cancel()
                     renderer.job?.let(media::remove)
                     if (active === renderer) onActive(false)
-                    BridgeState.update { it.copy(stage = "已停止投屏", progress = null) }
+                    BridgeState.update { it.copy(stage = "已停止投屏", progress = null, memoryCacheBytes = 0) }
                     if (wasPending) return Soap.success("Stop", command.namespace)
                 }
                 "Seek" -> if (renderer.gate.phase == CastGate.Phase.PREPARING || renderer.job?.let { it.settings.mode == io.github.kazumibridge.core.CastMode.STREAM && !it.complete } == true) {

@@ -19,6 +19,7 @@ class KazumiModule : XposedModule() {
     private var targetProcess = false
     private var prefs: SharedPreferences? = null
     private var listener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+    private var foreground: ForegroundLauncher? = null
     @Volatile private var lastDiagnostic = ""
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
@@ -31,18 +32,19 @@ class KazumiModule : XposedModule() {
         val applicationAttach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
         hook(applicationAttach).setId("kazumi.bridge.attach").intercept { chain ->
             val result = chain.proceed()
-            if (installed.compareAndSet(false, true)) initialize()
+            if (installed.compareAndSet(false, true)) initialize(chain.thisObject as Application)
             result
         }
         log(Log.INFO, "KazumiBridge", "API $apiVersion module ready for Kazumi")
     }
 
-    private fun initialize() {
+    private fun initialize(application: Application) {
         try {
             NativeBridge.load(moduleApplicationInfo.sourceDir, moduleApplicationInfo.nativeLibraryDir)
             val status = NativeBridge.install()
             log(if (status == 0) Log.INFO else Log.ERROR, "KazumiBridge", "Native connect hook ${if (status == 0) "installed" else "failed: $status"}; ${NativeBridge.diagnostic()}")
             prefs = getRemotePreferences("bridge")
+            foreground = ForegroundLauncher(application, prefs!!)
             listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> synchronize(status) }
             prefs!!.registerOnSharedPreferenceChangeListener(listener)
             synchronize(status)
@@ -55,6 +57,7 @@ class KazumiModule : XposedModule() {
 
     private fun synchronize(status: Int) {
         runCatching {
+            foreground?.refresh()
             val diagnostic = NativeBridge.diagnostic()
             if (diagnostic != lastDiagnostic) {
                 lastDiagnostic = diagnostic

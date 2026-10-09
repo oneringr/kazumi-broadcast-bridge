@@ -47,8 +47,8 @@ class MediaServer : AutoCloseable {
         return "http://$authority:${server.localPort}/media/${job.id}/video.mp4"
     }
 
-    fun remove(job: MediaJob) { jobs.remove(job.id); if (job.session == null || job.complete) job.file.delete() }
-    fun cacheBytes(): Long = jobs.values.sumOf { it.file.length() }
+    fun remove(job: MediaJob) { jobs.remove(job.id); if (job.session == null || job.complete) job.releaseMedia() }
+    fun cacheBytes(): Long = jobs.values.sumOf { it.size }
 
     private fun handle(socket: Socket) {
         socket.soTimeout = 10000
@@ -68,7 +68,7 @@ class MediaServer : AutoCloseable {
         val output = socket.getOutputStream().buffered()
         val head = request.method == "HEAD"
         if (job.complete) {
-            val size = job.file.length()
+            val size = job.size
             val range = ByteRanges.parse(request.header("range"), size)
             if (range == RangeResult.Invalid) {
                 HttpResponse(416, "Range Not Satisfiable", mapOf("content-range" to "bytes */$size")).writeTo(output, head)
@@ -78,14 +78,15 @@ class MediaServer : AutoCloseable {
             val headers = commonHeaders(true) + mapOf("accept-ranges" to "bytes", "content-length" to selection.length.toString()) +
                 (if (range is RangeResult.Partial) mapOf("content-range" to "bytes ${selection.start}-${selection.end}/$size") else emptyMap())
             HttpResponse(if (range is RangeResult.Partial) 206 else 200, if (range is RangeResult.Partial) "Partial Content" else "OK", headers).writeTo(output, true)
-            if (!head) RandomAccessFile(job.file, "r").use { file ->
-                file.seek(selection.start)
+            if (!head) withMediaReader(job) { read ->
+                var offset = selection.start
                 var remaining = selection.length
                 val buffer = ByteArray(65536)
-                while (remaining > 0 && !job.canceled && job.error == null) {
-                    val count = file.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                    if (count < 0) break
+                while (remaining > 0 && !closed && !job.canceled && job.error == null) {
+                    val count = read(offset, buffer, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (count <= 0) break
                     output.write(buffer, 0, count)
+                    offset += count
                     remaining -= count
                 }
             }
@@ -94,26 +95,37 @@ class MediaServer : AutoCloseable {
         }
         val requestedRange = request.header("range")
         if (requestedRange != null && requestedRange !in setOf("bytes=0-", "bytes=0-0")) {
-            HttpResponse(416, "Range Not Satisfiable", mapOf("content-range" to "bytes */${job.file.length()}")).writeTo(output, head)
+            HttpResponse(416, "Range Not Satisfiable", mapOf("content-range" to "bytes */${job.size}")).writeTo(output, head)
             BridgeState.event("接收设备请求拖动进度；分片生成期间不支持此操作。")
             return
         }
         val headers = commonHeaders(false) + mapOf("accept-ranges" to "none", "transfer-encoding" to "chunked", "connection" to "close")
         writeStreamingHeaders(output, 200, "OK", headers)
         if (head) { output.flush(); return }
-        RandomAccessFile(job.file, "r").use { file ->
+        withMediaReader(job) { read ->
             val buffer = ByteArray(65536)
+            var offset = 0L
             while (!job.canceled && job.error == null && !closed) {
-                val count = file.read(buffer)
+                val count = read(offset, buffer, buffer.size)
                 if (count > 0) {
                     output.write(count.toString(16).toByteArray(Charsets.US_ASCII)); output.write("\r\n".toByteArray())
                     output.write(buffer, 0, count); output.write("\r\n".toByteArray()); output.flush()
+                    offset += count
                 } else {
                     if (job.complete) break
                     synchronized(job.monitor) { if (!job.complete && !job.canceled) job.monitor.wait(250) }
                 }
             }
             if (!job.canceled && job.error == null) { output.write("0\r\n\r\n".toByteArray()); output.flush() }
+        }
+    }
+
+    private fun withMediaReader(job: MediaJob, action: ((Long, ByteArray, Int) -> Int) -> Unit) {
+        val memory = job.memoryOutput?.buffer
+        if (memory != null) {
+            action { offset, bytes, count -> memory.read(offset, bytes, 0, count) }
+        } else RandomAccessFile(job.file, "r").use { file ->
+            action { offset, bytes, count -> file.seek(offset); file.read(bytes, 0, count) }
         }
     }
 
@@ -163,7 +175,7 @@ class MediaServer : AutoCloseable {
         closed = true
         server.close()
         clients.forEach { runCatching { it.close() } }
-        jobs.values.forEach { it.cancel() }
+        jobs.values.forEach { it.cancel(); remove(it) }
         workers.shutdownNow()
         jobs.clear()
     }

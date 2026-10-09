@@ -2,6 +2,8 @@ package io.github.kazumibridge
 
 import android.app.Application
 import android.content.SharedPreferences
+import android.os.SystemClock
+import io.github.kazumibridge.hook.ForegroundLauncher
 import io.github.kazumibridge.runtime.BridgeState
 import io.github.kazumibridge.runtime.Settings
 import io.github.libxposed.service.XposedService
@@ -37,9 +39,27 @@ object FrameworkConnection {
     @Volatile var port = 0
     @Volatile var token = ""
     @Volatile var active = false
+    private var foregroundRequest = ""
+    private var foregroundRequestedAt = 0L
 
-    @Synchronized fun publish() {
-        val written = preferences?.edit()?.putBoolean("enabled", active)?.putInt("port", port)?.putString("token", token)?.commit()
+    @Synchronized fun requestForeground(): Boolean {
+        if (!active || preferences == null) return false
+        foregroundRequest = java.util.UUID.randomUUID().toString()
+        foregroundRequestedAt = SystemClock.elapsedRealtime()
+        return publish()
+    }
+
+    @Synchronized fun clearForegroundRequest(): Boolean {
+        foregroundRequest = ""
+        foregroundRequestedAt = 0L
+        return publish()
+    }
+
+    @Synchronized fun publish(): Boolean {
+        if (!active) { foregroundRequest = ""; foregroundRequestedAt = 0L }
+        val written = preferences?.edit()?.putBoolean("enabled", active)?.putInt("port", port)?.putString("token", token)
+            ?.putString(ForegroundLauncher.REQUEST_KEY, foregroundRequest)?.putLong(ForegroundLauncher.TIME_KEY, foregroundRequestedAt)?.commit()
         if (written == false) BridgeState.error("配置未能传入 Kazumi，请重新打开模块后重启 Kazumi。")
+        return written == true
     }
 }

@@ -13,7 +13,8 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Semaphore
 
 /** A cast owns this loopback server and, optionally, bounded downloads for finite VOD media. */
-class HlsSnapshot private constructor(private val headers: Map<String, String>, download: HlsDownloadCache.Options?, private val canceled: () -> Boolean) : AutoCloseable {
+class HlsSnapshot private constructor(private val headers: Map<String, String>, download: HlsDownloadCache.Options?, explicitBudget: MemoryBudget?, private val canceled: () -> Boolean) : AutoCloseable {
+    private val memoryBudget = explicitBudget ?: download?.memoryBudget?.takeIf { download.storage == CacheStorage.MEMORY }
     data class MediaStats(val segmentCount: Int, val extinfDurationSum: Double, val gapCount: Int,
         val gapDuration: Double, val discontinuityCount: Int, val keyMethods: Set<String>, val parallel: Boolean)
     private class Entry(val source: String, val path: String, val ancestors: Set<String>) {
@@ -35,7 +36,7 @@ class HlsSnapshot private constructor(private val headers: Map<String, String>, 
     private val workers = Executors.newCachedThreadPool { task -> Thread(task, "KazumiBridge-HLS").apply { isDaemon = true } }
     private var storedBytes = 0
     @Volatile private var manifestFailure: String? = null
-    val failure: String? get() = downloads?.failure ?: manifestFailure
+    val failure: String? get() = memoryBudget?.failure ?: downloads?.failure ?: manifestFailure
     val downloadBytes: Long get() = downloads?.bytes ?: 0
     val downloadStats: HlsDownloadCache.Stats? get() = downloads?.stats
     val mediaStats: List<MediaStats> get() = synchronized(entries) { finiteMedia.values.toList() }
@@ -48,11 +49,11 @@ class HlsSnapshot private constructor(private val headers: Map<String, String>, 
             it.startsWith("#EXT-X-STREAM-INF:") || it.startsWith("#EXT-X-I-FRAME-STREAM-INF:") ||
                 it.startsWith("#EXT-X-IMAGE-STREAM-INF:") || it.startsWith("#EXT-X-MEDIA:")
         }
-        fun create(source: String, manifest: ByteArray, headers: Map<String, String>, download: HlsDownloadCache.Options? = null, canceled: () -> Boolean = { false }): HlsSnapshot? {
+        fun create(source: String, manifest: ByteArray, headers: Map<String, String>, download: HlsDownloadCache.Options? = null, memoryBudget: MemoryBudget? = null, canceled: () -> Boolean = { false }): HlsSnapshot? {
             require(MediaPolicy.isHls(manifest)) { "来源不是 HLS 清单。" }
             val text = manifest.toString(Charsets.UTF_8).trimStart('\uFEFF')
             if (!master(text) && !text.lineSequence().any { it.trim() == "#EXT-X-ENDLIST" }) return null
-            val snapshot = HlsSnapshot(headers.toMap(), download, canceled)
+            val snapshot = HlsSnapshot(headers.toMap(), download, memoryBudget, canceled)
             try {
                 val root = snapshot.register(source, emptySet())
                 root.bytes = snapshot.rewrite(root, manifest)
@@ -181,7 +182,9 @@ class HlsSnapshot private constructor(private val headers: Map<String, String>, 
     }
 
     private fun account(count: Int) = synchronized(entries) {
+        check(!closed && !canceled()) { "投屏已停止。" }
         require(storedBytes + count <= 8 * 1024 * 1024) { "HLS 清单缓存超过 8 MiB。" }
+        memoryBudget?.reserve(count.toLong())
         storedBytes += count
     }
 
@@ -256,6 +259,11 @@ class HlsSnapshot private constructor(private val headers: Map<String, String>, 
         downloads?.close()
         paths.clear()
         mediaPaths.clear()
-        synchronized(entries) { entries.clear() }
+        synchronized(entries) {
+            entries.clear()
+            finiteMedia.clear()
+            memoryBudget?.release(storedBytes.toLong())
+            storedBytes = 0
+        }
     }
 }

@@ -24,5 +24,6 @@
             </intent-filter>
         </activity>
         <service android:name=".runtime.BridgeService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <provider android:name=".runtime.MemoryMediaProvider" android:authorities="${applicationId}.memory" android:exported="false" />
     </application>
 </manifest>

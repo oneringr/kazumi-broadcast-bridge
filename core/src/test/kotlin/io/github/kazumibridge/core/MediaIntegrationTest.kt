@@ -83,6 +83,21 @@ class MediaIntegrationTest {
         assertEquals(setOf("h264", "aac"), codecs(output))
     }
 
+    @Test fun reservedFrontIndexKeepsTheWholeVideoWithoutFaststartReopening() {
+        val output = File(directory, "reserved-moov.mp4")
+        run("ffmpeg", MediaPolicy.arguments("$base/video.txt", output.absolutePath,
+            ConversionPlan(false, true, true), CastMode.COMPLETE, MediaPolicy.networkOptions(headers),
+            moovReserveBytes = 65536))
+        assertEquals(setOf("h264", "aac"), codecs(output))
+        val bytes = output.readBytes().toString(Charsets.ISO_8859_1)
+        assertTrue("The reserved index must precede media data", bytes.indexOf("moov") in 0 until bytes.indexOf("mdat"))
+        for (track in listOf("v:0", "a:0")) {
+            val duration = run("ffprobe", listOf("-v", "error", "-select_streams", track, "-show_entries", "stream=duration",
+                "-of", "csv=p=0", output.absolutePath)).trim().toDouble()
+            assertTrue("The $track track must retain the entire clip", duration in 1.95..2.15)
+        }
+    }
+
     @Test fun networkProbeWorksForMp4WithMisleadingSuffix() {
         val result = run("ffprobe", listOf("-v", "error") + MediaPolicy.networkOptions(headers) +
             listOf("-show_entries", "format=format_name", "-of", "default=noprint_wrappers=1:nokey=1", "$base/video.txt"))

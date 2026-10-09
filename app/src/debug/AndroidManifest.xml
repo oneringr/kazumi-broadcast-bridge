@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation
+        android:name="io.github.kazumibridge.runtime.MemoryCacheInstrumentation"
+        android:targetPackage="${applicationId}"
+        android:handleProfiling="false"
+        android:functionalTest="true" />
+    <application>
+        <receiver
+            android:name="io.github.kazumibridge.runtime.ForegroundTestReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="io.github.kazumibridge.debug.REQUEST_FOREGROUND" />
+                <action android:name="io.github.kazumibridge.debug.CLEAR_FOREGROUND" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

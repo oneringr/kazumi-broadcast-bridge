@@ -38,10 +38,11 @@ class BridgeService : Service() {
         if (relay == null) lifecycle.execute {
             if (relay != null || stopping) return@execute
             try {
-                engine = MediaEngine(File(cacheDir, "cast-media"))
+                engine = MediaEngine(this, File(cacheDir, "cast-media"))
                 media = MediaServer()
                 wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KazumiBridge:cast").apply { setReferenceCounted(false) }
                 controller = RendererController(engine!!, media!!) { active ->
+                    if (active) FrameworkConnection.requestForeground() else FrameworkConnection.clearForegroundRequest()
                     wakeLock?.let { lock -> synchronized(lock) {
                         if (active && !stopping && !lock.isHeld) lock.acquire(8 * 60 * 60 * 1000L)
                         else if (!active && lock.isHeld) lock.release()
@@ -73,7 +74,7 @@ class BridgeService : Service() {
             runCatching { media?.close() }
             runCatching { engine?.close() }
             wakeLock?.let { if (it.isHeld) it.release() }
-            BridgeState.update { it.copy(running = false, progress = null, stage = "服务已停止", detail = "重新开启服务即可继续投屏。") }
+            BridgeState.update { it.copy(running = false, progress = null, memoryCacheBytes = 0, stage = "服务已停止", detail = "重新开启服务即可继续投屏。") }
             BridgeState.event("投屏服务已停止")
         }
         lifecycle.shutdown()

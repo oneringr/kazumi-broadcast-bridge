@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(kazumibridge LANGUAGES CXX)
 find_package(shadowhook REQUIRED CONFIG)
-add_library(kazumibridge SHARED bridge.cpp)
+add_library(kazumibridge SHARED bridge.cpp memory.cpp)
 target_compile_features(kazumibridge PRIVATE cxx_std_17)
 target_compile_options(kazumibridge PRIVATE -Wall -Wextra -Werror -fvisibility=hidden)
 target_link_options(kazumibridge PRIVATE -Wl,-z,max-page-size=16384)

@@ -25,6 +25,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import io.github.kazumibridge.core.CacheStorage
 import io.github.kazumibridge.core.CastMode
 import io.github.kazumibridge.runtime.BridgeService
 import io.github.kazumibridge.runtime.BridgeState
@@ -133,19 +134,37 @@ class MainActivity : ComponentActivity() {
                         Text(if (settings.mode == CastMode.COMPLETE) "等待完整 MP4 生成，接收端兼容性更好，并支持按字节读取和拖动进度。" else
                             "生成首个完整 MP4 分片后起播。眼镜需要支持分片 MP4 和流式 HTTP；生成期间无法任意拖动进度。若无法播放，请切回完整模式。",
                             fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
-                        SuperDropdown(items = listOf("1 路", "2 路", "4 路", "8 路"),
-                            selectedIndex = listOf(1, 2, 4, 8).indexOf(settings.hlsParallelism).coerceAtLeast(0),
+                        SuperDropdown(items = Settings.hlsParallelismOptions.map { "$it 路" },
+                            selectedIndex = Settings.hlsParallelismOptions.indexOf(settings.hlsParallelism).coerceAtLeast(0),
                             title = "HLS 下载并发", summary = "仅用于完整模式的有限视频；下一次投屏生效，来源限速时可降低并发。",
-                            onSelectedIndexChange = { saved(settings.copy(hlsParallelism = listOf(1, 2, 4, 8)[it])) })
+                            onSelectedIndexChange = { saved(settings.copy(hlsParallelism = Settings.hlsParallelismOptions[it])) })
+                        SuperSwitch(checked = settings.cacheMp4, onCheckedChange = { saved(settings.copy(cacheMp4 = it)) }, title = "缓存 MP4",
+                            summary = "开启后先完整缓存再投屏，减少来源网络波动造成的中断；下一次投屏生效。")
                         SuperSwitch(checked = settings.forceH264, onCheckedChange = { saved(settings.copy(forceH264 = it)) }, title = "强制使用 H.264",
                             summary = "开启后将 H.265 转为 H.264；重编码会增加耗电和发热。")
                     }
                 }
                 item {
                     Card(insideMargin = PaddingValues(0.dp)) {
-                        SuperDropdown(items = listOf("1 GB", "2 GB", "4 GB", "8 GB"), selectedIndex = listOf(1, 2, 4, 8).indexOf(settings.cacheGiB).coerceAtLeast(0),
-                            title = "单次缓存上限", summary = "分片与 MP4 合计达到上限或剩余空间不足时停止转换", onSelectedIndexChange = { saved(settings.copy(cacheGiB = listOf(1, 2, 4, 8)[it])) })
-                        BasicComponent(title = "清理缓存", summary = "当前 ${megabytes(cacheBytes)} MB。先停止服务即可清理。", enabled = !state.running, onClick = {
+                        SuperDropdown(items = Settings.cacheStorageOptions.map { if (it == CacheStorage.DISK) "磁盘" else "内存" },
+                            selectedIndex = Settings.cacheStorageOptions.indexOf(settings.cacheStorage).coerceAtLeast(0),
+                            title = "缓存位置", summary = "切换后在下一次投屏生效",
+                            onSelectedIndexChange = { saved(settings.copy(cacheStorage = Settings.cacheStorageOptions[it])) })
+                        if (settings.cacheStorage == CacheStorage.MEMORY) {
+                            SuperDropdown(items = Settings.memoryCacheMiBOptions.map { "$it MB" },
+                                selectedIndex = Settings.memoryCacheMiBOptions.indexOf(settings.memoryCacheMiB).coerceAtLeast(0),
+                                title = "内存缓存阈值", summary = "分片与最终 MP4 合计达到阈值即停止报错，不回退到磁盘；下一次投屏生效。",
+                                onSelectedIndexChange = { saved(settings.copy(memoryCacheMiB = Settings.memoryCacheMiBOptions[it])) })
+                        } else {
+                            SuperDropdown(items = Settings.diskCacheGiBOptions.map { "$it GB" },
+                                selectedIndex = Settings.diskCacheGiBOptions.indexOf(settings.cacheGiB).coerceAtLeast(0),
+                                title = "单次磁盘缓存上限", summary = "分片与 MP4 合计达到上限或剩余空间不足时停止转换",
+                                onSelectedIndexChange = { saved(settings.copy(cacheGiB = Settings.diskCacheGiBOptions[it])) })
+                        }
+                        if (settings.cacheStorage == CacheStorage.MEMORY || state.memoryCacheBytes > 0) {
+                            BasicComponent(title = "内存缓存占用", summary = "当前 ${megabytes(state.memoryCacheBytes)} MB。停止投屏或服务后自动释放。")
+                        }
+                        BasicComponent(title = "清理磁盘缓存", summary = "当前 ${megabytes(cacheBytes)} MB。先停止服务即可清理。", enabled = !state.running, onClick = {
                             MediaCache.clear(File(cacheDir, "cast-media"))
                             cacheBytes = cacheUsage()
                             Toast.makeText(this@MainActivity, "缓存已清理", Toast.LENGTH_SHORT).show()

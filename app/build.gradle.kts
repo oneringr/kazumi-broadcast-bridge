@@ -20,8 +20,8 @@ android {
         applicationId = "io.github.kazumibridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.0.10"
+        versionCode = 13
+        versionName = "1.0.12"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild { cmake { arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" } }
     }
@@ -34,6 +34,7 @@ android {
         }
     }
     buildTypes {
+        debug { signingConfig = signingConfigs.getByName("release") }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("release")

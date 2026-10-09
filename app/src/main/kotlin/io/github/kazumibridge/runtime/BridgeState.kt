@@ -16,6 +16,7 @@ data class BridgeSnapshot(
     val sourceHost: String = "",
     val receiver: String = "",
     val convertedBytes: Long = 0,
+    val memoryCacheBytes: Long = 0,
     val error: String? = null,
     val events: List<String> = emptyList(),
 )

@@ -2,5 +2,6 @@
 -keep class io.github.kazumibridge.hook.NativeBridge { *; }
 -keep class io.github.kazumibridge.hook.NativeRuntime { *; }
 -keep interface io.github.kazumibridge.hook.NativeBackend { *; }
+-keep class io.github.kazumibridge.runtime.NativeMemory { *; }
 -keep class com.antonkarpenko.ffmpegkit.** { *; }
 -dontwarn io.github.libxposed.annotation.**
