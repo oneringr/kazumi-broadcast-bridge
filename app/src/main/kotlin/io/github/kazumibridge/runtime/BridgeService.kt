@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import io.github.kazumibridge.FrameworkConnection
 import io.github.kazumibridge.R
+import io.github.kazumibridge.ui.LaunchDestination
 import io.github.kazumibridge.ui.MainActivity
 import java.io.File
 import java.security.SecureRandom
@@ -29,7 +30,10 @@ class BridgeService : Service() {
         if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
         (getSystemService(NotificationManager::class.java)).createNotificationChannel(
             NotificationChannel("cast", getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW))
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)
+            .putExtra(LaunchDestination.EXTRA_PAGE, LaunchDestination.CAST)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, BridgeService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         val notification = Notification.Builder(this, "cast").setSmallIcon(R.drawable.ic_bridge)
             .setContentTitle(getString(R.string.notification_title)).setContentText(getString(R.string.notification_body))

@@ -1,4 +1,7 @@
 import java.util.Properties
+import java.time.ZonedDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 plugins {
     id("com.android.application")
@@ -20,8 +23,11 @@ android {
         applicationId = "io.github.kazumibridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.0.12"
+        versionCode = 14
+        versionName = "1.1.0"
+        val buildTime = ZonedDateTime.now(ZoneOffset.ofHours(8))
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild { cmake { arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" } }
     }

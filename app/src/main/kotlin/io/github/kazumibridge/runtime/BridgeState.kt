@@ -7,6 +7,8 @@ data class BridgeSnapshot(
     val running: Boolean = false,
     val framework: String = "等待连接 LSPosed",
     val frameworkApi: Int = 0,
+    val scopeKazumi: Boolean? = null,
+    val runningKazumi: Boolean? = null,
     val hookSeenAt: Long = 0,
     val nativeStatus: Int? = null,
     val redirects: Long = 0,

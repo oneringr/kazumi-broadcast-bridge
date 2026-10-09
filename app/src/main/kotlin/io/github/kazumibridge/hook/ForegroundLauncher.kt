@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import io.github.kazumibridge.ui.LaunchDestination
 import java.lang.ref.WeakReference
 
 /** Launch from Kazumi's visible Activity rather than the module's background service. */
@@ -36,6 +37,7 @@ class ForegroundLauncher(application: Application, private val preferences: Shar
         if (activity.isFinishing || activity.isDestroyed) return
         try {
             activity.startActivity(Intent().setComponent(ComponentName("io.github.kazumibridge", "io.github.kazumibridge.ui.MainActivity"))
+                .putExtra(LaunchDestination.EXTRA_PAGE, LaunchDestination.CAST)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
             handled = request
             Log.i("KazumiBridgeDiagnostics", "Opened module UI for a new casting request")

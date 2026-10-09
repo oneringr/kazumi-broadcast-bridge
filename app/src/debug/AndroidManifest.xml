@@ -4,6 +4,11 @@
         android:targetPackage="${applicationId}"
         android:handleProfiling="false"
         android:functionalTest="true" />
+    <instrumentation
+        android:name="io.github.kazumibridge.ui.UiMetadataInstrumentation"
+        android:targetPackage="${applicationId}"
+        android:handleProfiling="false"
+        android:functionalTest="true" />
     <application>
         <receiver
             android:name="io.github.kazumibridge.runtime.ForegroundTestReceiver"
