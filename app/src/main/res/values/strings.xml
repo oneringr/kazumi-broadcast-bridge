@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Kazumi 投屏桥</string>
+    <string name="module_description">为 Kazumi DLNA 投屏识别视频并转换为 MP4，适配 DJI Goggles 2。需要 libxposed API 102。</string>
+    <string name="notification_channel">投屏服务</string>
+    <string name="notification_title">Kazumi 投屏桥已启动</string>
+    <string name="notification_body">保持服务运行，然后在 Kazumi 中选择投屏设备。</string>
+    <string name="stop_service">停止服务</string>
+</resources>

@@ -1,0 +1,15 @@
+.gradle/
+.kotlin/
+.cxx/
+**/build/
+local.properties
+logs/
+upstream/
+artifacts/
+*.jks
+*.keystore
+signing.properties
+.codex-remote-attachments/
+/core/init.mp4
+/docs/
+/tools/

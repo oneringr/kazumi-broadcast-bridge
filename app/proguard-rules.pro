@@ -1,0 +1,6 @@
+-keep class io.github.kazumibridge.hook.KazumiModule { public <init>(); *; }
+-keep class io.github.kazumibridge.hook.NativeBridge { *; }
+-keep class io.github.kazumibridge.hook.NativeRuntime { *; }
+-keep interface io.github.kazumibridge.hook.NativeBackend { *; }
+-keep class com.antonkarpenko.ffmpegkit.** { *; }
+-dontwarn io.github.libxposed.annotation.**
