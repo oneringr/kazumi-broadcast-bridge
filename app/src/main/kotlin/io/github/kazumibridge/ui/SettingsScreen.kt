@@ -99,6 +99,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
                 }
             }
         }
+        item { SectionTitle("后台运行") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 28.dp) {
+                BackgroundProtection()
+            }
+        }
     }
 }
 

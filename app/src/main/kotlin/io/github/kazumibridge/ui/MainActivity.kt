@@ -83,6 +83,12 @@ class MainActivity : ComponentActivity() {
         if (launch != null) startActivity(launch) else Toast.makeText(this, "请先安装 Kazumi", Toast.LENGTH_SHORT).show()
     }
 
+    private fun recoveryAction(action: String, taskId: String) {
+        if (!BridgeState.flow.value.running || taskId.isEmpty()) return
+        runCatching { startService(Intent(this, BridgeService::class.java).setAction(action).putExtra(BridgeService.EXTRA_TASK_ID, taskId)) }
+            .onFailure { Toast.makeText(this, "操作未执行，请检查服务状态。", Toast.LENGTH_SHORT).show() }
+    }
+
     @Composable private fun BridgeScreen() {
         val state by BridgeState.flow.collectAsState()
         var selected by rememberSaveable { mutableIntStateOf(0) }
@@ -136,7 +142,8 @@ class MainActivity : ComponentActivity() {
                         0 -> MiuixTheme(controller = moduleTheme) {
                             ModuleScreen(state, modifier.background(MiuixTheme.colorScheme.background))
                         }
-                        1 -> CastScreen(state, { toggleService(state.running) }, ::openKazumi, modifier)
+                        1 -> CastScreen(state, { toggleService(state.running) }, ::openKazumi,
+                            { recoveryAction(BridgeService.ACTION_RETRY, state.taskId) }, { recoveryAction(BridgeService.ACTION_FORCE, state.taskId) }, modifier)
                         2 -> SettingsScreen(state, modifier)
                         else -> AboutScreen(modifier)
                     }

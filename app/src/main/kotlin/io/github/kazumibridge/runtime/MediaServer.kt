@@ -48,6 +48,8 @@ class MediaServer : AutoCloseable {
     }
 
     fun remove(job: MediaJob) { jobs.remove(job.id); if (job.session == null || job.complete) job.releaseMedia() }
+    /** Hide a rejected duration candidate while its owner keeps the finalized output for review. */
+    fun detach(job: MediaJob) { jobs.remove(job.id, job) }
     fun cacheBytes(): Long = jobs.values.sumOf { it.size }
 
     private fun handle(socket: Socket) {

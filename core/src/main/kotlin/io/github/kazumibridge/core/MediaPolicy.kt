@@ -6,22 +6,31 @@ import java.io.RandomAccessFile
 enum class CastMode { COMPLETE, STREAM }
 data class ProbeResult(val format: String, val videoCodec: String, val audioCodec: String?, val pixelFormat: String, val channels: Int, val duration: Double?)
 data class ConversionPlan(val passthrough: Boolean, val copyVideo: Boolean, val copyAudio: Boolean, val stripAdts: Boolean = false)
+class DurationMismatch(val completedDuration: Double, message: String) : IllegalArgumentException(message)
 
 object MediaPolicy {
     /** Chapter/data-track durations must not hide truncated audio or video. */
-    fun completedDuration(expectedVideo: Double?, actualVideo: Double?, expectedAudio: Double? = null, actualAudio: Double? = null): Double {
-        fun validate(track: String, expected: Double?, actual: Double?) {
+    fun completedDuration(expectedVideo: Double?, actualVideo: Double?, expectedAudio: Double? = null, actualAudio: Double? = null,
+        requiresAudio: Boolean = expectedAudio != null): Double {
+        fun validDuration(track: String, actual: Double?): Double {
             require(actual != null && actual.isFinite() && actual > 0) { "生成的 MP4 缺少有效的${track}时长。" }
-            if (expected != null && expected.isFinite() && expected > 0) {
-                val tolerance = maxOf(2.0, expected * 0.001)
-                require(actual >= expected - tolerance) {
-                    "${track}转换提前结束：来源约 ${expected.toInt()} 秒，生成约 ${actual.toInt()} 秒。请重试或更换来源。"
-                }
-            }
+            return actual
         }
-        validate("视频", expectedVideo, actualVideo)
-        if (expectedAudio != null) validate("音频", expectedAudio, actualAudio)
-        return maxOf(actualVideo!!, actualAudio?.takeIf { it.isFinite() && it > 0 } ?: 0.0)
+        // A short video must never conceal an unreadable or absent required audio track.
+        val video = validDuration("视频", actualVideo)
+        val audio = if (requiresAudio) validDuration("音频", actualAudio) else actualAudio?.takeIf { it.isFinite() && it > 0 }
+        val completed = maxOf(video, audio ?: 0.0)
+        fun shortened(track: String, expected: Double?, actual: Double): String? {
+            if (expected == null || !expected.isFinite() || expected <= 0) return null
+            val tolerance = maxOf(2.0, expected * 0.001)
+            return if (actual < expected - tolerance) "${track}转换提前结束：来源约 ${expected.toInt()} 秒，生成约 ${actual.toInt()} 秒。" else null
+        }
+        val mismatches = buildList {
+            shortened("视频", expectedVideo, video)?.let(::add)
+            if (requiresAudio) shortened("音频", expectedAudio, audio!!)?.let(::add)
+        }
+        if (mismatches.isNotEmpty()) throw DurationMismatch(completed, mismatches.joinToString("\n") + "\n请重试或更换来源。")
+        return completed
     }
 
     fun networkOptions(headers: Map<String, String>, hls: Boolean = false): List<String> = buildList {

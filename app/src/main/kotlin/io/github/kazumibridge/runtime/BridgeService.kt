@@ -9,6 +9,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.net.wifi.WifiManager
 import io.github.kazumibridge.FrameworkConnection
 import io.github.kazumibridge.R
 import io.github.kazumibridge.ui.LaunchDestination
@@ -24,10 +28,40 @@ class BridgeService : Service() {
     private var engine: MediaEngine? = null
     private var controller: RendererController? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val powerLock = Any()
+    private val powerHandler = Handler(Looper.getMainLooper())
+    private var powerActive = false
+    private val renewPower = object : Runnable {
+        override fun run() = synchronized(powerLock) {
+            if (powerActive && !stopping) {
+                acquireCpuLease()
+                powerHandler.postDelayed(this, POWER_RENEW_MS)
+            }
+            Unit
+        }
+    }
     @Volatile private var stopping = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
+        if (intent?.action in setOf(ACTION_RETRY, ACTION_FORCE)) {
+            if (!stopping) lifecycle.execute {
+                if (stopping) return@execute
+                val taskId = intent?.getStringExtra(EXTRA_TASK_ID).orEmpty()
+                val accepted = runCatching {
+                    when {
+                        taskId.isEmpty() -> false
+                        intent?.action == ACTION_RETRY -> controller?.retryLast(taskId) == true
+                        intent?.action == ACTION_FORCE -> controller?.forceLast(taskId) == true
+                        else -> false
+                    }
+                }.onFailure { BridgeState.error("恢复投屏失败：${it.javaClass.simpleName}。") }.getOrDefault(false)
+                if (!accepted) BridgeState.event("当前任务已变化，操作未执行。")
+                if (controller == null && relay == null) stopSelf(startId)
+            }
+            return START_NOT_STICKY
+        }
         (getSystemService(NotificationManager::class.java)).createNotificationChannel(
             NotificationChannel("cast", getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)
@@ -45,12 +79,16 @@ class BridgeService : Service() {
                 engine = MediaEngine(this, File(cacheDir, "cast-media"))
                 media = MediaServer()
                 wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KazumiBridge:cast").apply { setReferenceCounted(false) }
+                @Suppress("DEPRECATION")
+                val wifiMode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                // API 34+ maps HIGH_PERF to LOW_LATENCY, which has no screen-off effect.
+                if (Build.VERSION.SDK_INT < 34) {
+                    wifiLock = applicationContext.getSystemService(WifiManager::class.java)
+                        ?.createWifiLock(wifiMode, "KazumiBridge:wifi")?.apply { setReferenceCounted(false) }
+                }
                 controller = RendererController(engine!!, media!!) { active ->
                     if (active) FrameworkConnection.requestForeground() else FrameworkConnection.clearForegroundRequest()
-                    wakeLock?.let { lock -> synchronized(lock) {
-                        if (active && !stopping && !lock.isHeld) lock.acquire(8 * 60 * 60 * 1000L)
-                        else if (!active && lock.isHeld) lock.release()
-                    } }
+                    updatePowerLocks(active)
                 }
                 val token = ByteArray(32).also(SecureRandom()::nextBytes)
                 relay = RelayServer(token, controller!!)
@@ -70,6 +108,7 @@ class BridgeService : Service() {
 
     override fun onDestroy() {
         stopping = true
+        updatePowerLocks(false)
         FrameworkConnection.active = false
         FrameworkConnection.publish()
         lifecycle.execute {
@@ -77,8 +116,9 @@ class BridgeService : Service() {
             runCatching { relay?.close() }
             runCatching { media?.close() }
             runCatching { engine?.close() }
-            wakeLock?.let { if (it.isHeld) it.release() }
-            BridgeState.update { it.copy(running = false, progress = null, memoryCacheBytes = 0, stage = "服务已停止", detail = "重新开启服务即可继续投屏。") }
+            updatePowerLocks(false)
+            BridgeState.update { it.copy(running = false, progress = null, memoryCacheBytes = 0, sourceUrl = "", sourceHost = "", taskId = "",
+                canRetry = false, canForce = false, stage = "服务已停止", detail = "重新开启服务即可继续投屏。") }
             BridgeState.event("投屏服务已停止")
         }
         lifecycle.shutdown()
@@ -86,5 +126,29 @@ class BridgeService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-    companion object { const val ACTION_STOP = "io.github.kazumibridge.STOP" }
+    private fun updatePowerLocks(active: Boolean) = synchronized(powerLock) {
+        powerActive = active && !stopping
+        powerHandler.removeCallbacks(renewPower)
+        if (active && !stopping) {
+            acquireCpuLease()
+            powerHandler.postDelayed(renewPower, POWER_RENEW_MS)
+            runCatching { wifiLock?.let { if (!it.isHeld) it.acquire() } }
+                .onFailure { BridgeState.event("Wi-Fi 保活锁不可用：${it.javaClass.simpleName}") }
+        } else {
+            runCatching { wifiLock?.let { if (it.isHeld) it.release() } }
+            runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        }
+    }
+    private fun acquireCpuLease() {
+        runCatching { wakeLock?.acquire(POWER_LEASE_MS) }
+            .onFailure { BridgeState.event("CPU 保活锁不可用：${it.javaClass.simpleName}") }
+    }
+    companion object {
+        const val ACTION_STOP = "io.github.kazumibridge.STOP"
+        const val ACTION_RETRY = "io.github.kazumibridge.RETRY"
+        const val ACTION_FORCE = "io.github.kazumibridge.FORCE"
+        const val EXTRA_TASK_ID = "io.github.kazumibridge.TASK_ID"
+        private const val POWER_LEASE_MS = 2 * 60 * 60 * 1000L
+        private const val POWER_RENEW_MS = 30 * 60 * 1000L
+    }
 }

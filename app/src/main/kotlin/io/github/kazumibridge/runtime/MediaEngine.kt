@@ -10,6 +10,7 @@ import com.antonkarpenko.ffmpegkit.ReturnCode
 import io.github.kazumibridge.core.CastMode
 import io.github.kazumibridge.core.CacheStorage
 import io.github.kazumibridge.core.CachedMp4Download
+import io.github.kazumibridge.core.DurationMismatch
 import io.github.kazumibridge.core.MemoryBudget
 import io.github.kazumibridge.core.HlsDownloadCache
 import io.github.kazumibridge.core.HlsSnapshot
@@ -53,11 +54,14 @@ class MediaJob(val source: String, val directory: File, val settings: BridgeSett
     @Volatile var direct = false
     @Volatile var error: String? = null
     @Volatile var duration: Double? = null
+    /** Only a readable, finalized output that failed the source-duration comparison may be kept. */
+    @Volatile var durationMismatch: DurationMismatch? = null
     @Volatile var session: FFmpegSession? = null
     @Volatile var connection: HttpURLConnection? = null
     @Volatile var snapshot: HlsSnapshot? = null
     fun cancel() {
         canceled = true
+        durationMismatch = null
         session?.cancel()
         connection?.disconnect()
         snapshot?.close()
@@ -75,9 +79,13 @@ class MediaEngine(private val context: Context, private val directory: File) : A
         FFmpegKitConfig.setLogRedirectionStrategy(LogRedirectionStrategy.NEVER_PRINT_LOGS)
     }
 
-    fun prepare(source: String, settings: BridgeSettings, current: () -> Boolean, ready: (MediaJob) -> Unit, failed: (String) -> Unit): MediaJob {
+    fun prepare(source: String, settings: BridgeSettings, current: () -> Boolean, ready: (MediaJob) -> Unit,
+                failed: (MediaJob, String) -> Unit, created: (MediaJob) -> Unit = {}): MediaJob {
         val job = MediaJob(source, directory, settings, context)
+        // Establish renderer ownership before the worker can complete a small/direct resource.
+        created(job)
         workers.execute {
+            var failureMessage: String? = null
             try {
                 if (job.canceled || !current()) return@execute
                 BridgeState.update { it.copy(stage = "识别视频", detail = "读取容器和音视频编码", sourceHost = URI(source).host.orEmpty(), progress = null, convertedBytes = 0, memoryCacheBytes = 0, error = null) }
@@ -129,7 +137,7 @@ class MediaEngine(private val context: Context, private val directory: File) : A
                     if (settings.cacheMp4) {
                         cacheMp4(job, current)
                         if (job.canceled || !current()) return@execute
-                        validateOutput(job, expectedVideo, expectedAudio)
+                        validateOutput(job, expectedVideo, expectedAudio, audio != null)
                         job.complete = true
                         ready(job)
                         if (current()) BridgeState.update { it.copy(detail = "MP4 完整缓存，支持接收设备按字节读取", progress = 1.0, convertedBytes = job.size, memoryCacheBytes = job.memoryBudget?.usedBytes ?: 0) }
@@ -174,7 +182,7 @@ class MediaEngine(private val context: Context, private val directory: File) : A
                     if (job.memoryError != null) {
                         job.error = job.memoryError
                         job.session?.cancel()
-                    } else if (job.memoryBudget == null && (job.size + (job.snapshot?.downloadBytes ?: 0L) >= settings.cacheLimitBytes || directory.usableSpace < 128L * 1024 * 1024)) {
+                    } else if (diskLimitReached(job)) {
                         job.error = "缓存达到上限或剩余空间不足；请清理空间或调整缓存上限。"
                         job.session?.cancel()
                     }
@@ -192,7 +200,7 @@ class MediaEngine(private val context: Context, private val directory: File) : A
                 check(job.size > 0) { "转换未生成 MP4 文件。" }
                 BridgeState.update { it.copy(detail = "校验生成文件的音视频时长") }
                 try {
-                    validateOutput(job, expectedVideo, expectedAudio)
+                    validateOutput(job, expectedVideo, expectedAudio, audio != null)
                 } catch (error: IllegalArgumentException) {
                     diagnostic("conversion validation failed; nativeLog=${sanitize(job.session?.allLogsAsString.orEmpty().takeLast(1500), settings)}")
                     throw error
@@ -201,17 +209,23 @@ class MediaEngine(private val context: Context, private val directory: File) : A
                 if (current()) BridgeState.update { it.copy(detail = if (settings.mode == CastMode.STREAM) "MP4 已生成；分片模式的进度拖动取决于接收设备。" else "MP4 已生成，支持接收设备按字节读取", progress = 1.0, convertedBytes = job.size, memoryCacheBytes = job.memoryBudget?.usedBytes ?: 0) }
             } catch (error: Throwable) {
                 if (!job.canceled && current()) {
+                    if (error is DurationMismatch && job.memoryError == null && job.size > 0) {
+                        job.duration = error.completedDuration
+                        job.durationMismatch = error
+                    } else job.session?.cancel()
                     job.error = sanitize(job.memoryError ?: job.error ?: error.message ?: error.javaClass.simpleName, settings)
-                    failed(job.error!!)
+                    failureMessage = job.error
                 }
             } finally {
                 job.complete = true
                 job.connection?.disconnect()
                 job.snapshot?.close()
                 synchronized(job.monitor) { job.monitor.notifyAll() }
-                if (job.canceled || job.error != null || !current()) job.releaseMedia()
+                if (job.canceled || (job.durationMismatch == null && (job.error != null || !current()))) job.releaseMedia()
                 if (current()) BridgeState.update { it.copy(memoryCacheBytes = job.memoryBudget?.usedBytes ?: 0) }
             }
+            // A force button must not become available while finally can still release its output.
+            failureMessage?.let { message -> if (!job.canceled && current()) failed(job, message) }
         }
         return job
     }
@@ -248,7 +262,9 @@ class MediaEngine(private val context: Context, private val directory: File) : A
         check(job.size > 0) { "缓存 MP4 为空。" }
     }
 
-    private fun validateOutput(job: MediaJob, expectedVideo: Double?, expectedAudio: Double?) {
+    private fun validateOutput(job: MediaJob, expectedVideo: Double?, expectedAudio: Double?, requiresAudio: Boolean) {
+        // FFmpeg can finish between polling ticks. Check the finalized cache before any recoverable duration result.
+        check(!diskLimitReached(job)) { "缓存达到上限或剩余空间不足；请清理空间或调整缓存上限。" }
         val outputProbe = FFprobeKit.executeWithArguments(arrayOf("-v", "error", "-show_streams", "-of", "json", job.outputParameter()))
         check(ReturnCode.isSuccess(outputProbe.returnCode)) { job.memoryError ?: "生成的 MP4 无法读取。" }
         val streams = JSONObject(outputProbe.output).getJSONArray("streams")
@@ -257,8 +273,11 @@ class MediaEngine(private val context: Context, private val directory: File) : A
         val video = duration("video")
         val audio = duration("audio")
         diagnostic("output bytes=${job.size}; videoDuration=$video; audioDuration=$audio")
-        job.duration = MediaPolicy.completedDuration(expectedVideo, video, expectedAudio, audio)
+        job.duration = MediaPolicy.completedDuration(expectedVideo, video, expectedAudio, audio, requiresAudio)
     }
+
+    private fun diskLimitReached(job: MediaJob): Boolean = job.memoryBudget == null &&
+        (job.size + (job.snapshot?.downloadBytes ?: 0L) >= job.settings.cacheLimitBytes || directory.usableSpace < 128L * 1024 * 1024)
 
     // Keep moov before mdat without reopening the SAF writer for faststart.
     private fun moovReserve(duration: Double?): Int {

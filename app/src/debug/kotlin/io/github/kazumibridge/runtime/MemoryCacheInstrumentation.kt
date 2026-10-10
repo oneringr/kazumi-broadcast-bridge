@@ -535,7 +535,7 @@ class MemoryCacheInstrumentation : Instrumentation() {
                 val error = AtomicReference<String?>()
                 val current = AtomicBoolean(true)
                 val job = engine.prepare(fixture.url(path), configuration, current::get,
-                    ready = { finished.countDown() }, failed = { error.set(it); finished.countDown() })
+                    ready = { finished.countDown() }, failed = { _, message -> error.set(message); finished.countDown() })
                 jobs.add(job)
                 check(finished.await(35, TimeUnit.SECONDS)) { "Runtime $path preparation timed out" }
                 check(error.get() == null) { "Runtime $path preparation failed: ${error.get()}" }
