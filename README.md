@@ -40,20 +40,9 @@
 
 ## 关于项目
 
-Kazumi 投屏桥是使用 **libxposed API 102** 的 LSPosed 模块，目标是让 Kazumi 的视频来源以接收端兼容的 MP4 播放。模块仅作用于 `com.predidit.kazumi`，不修改 Kazumi APK。
+Kazumi 投屏桥是基于 **libxposed API 102** 的 LSPosed 模块，作用于 `com.predidit.kazumi`，无需修改 Kazumi APK。模块根据文件内容和音视频编码处理来源：兼容 MP4 直接转发或缓存，HLS 等来源重新封装，必要时转为 H.264 / AAC，再通过手机上的 HTTP 服务提供给眼镜。
 
-投屏时，模块根据文件内容和音视频编码判断兼容性：兼容 MP4 可直接转发或先缓存；HLS 等来源重新封装，必要时转为 H.264 / AAC，再通过手机上的 HTTP 服务提供给眼镜。
-
-- **两种投屏模式：** 默认完整转换后播放，可选边转换边投屏。
-- **HLS 并发下载：** 有限视频的完整模式支持 1 / 2 / 4 / 8 / 16 / 32 路，保留分片顺序、加密信息与请求头。
-- **可选缓存 MP4：** 默认关闭；开启后完整下载再投屏，减少来源网络波动造成的中断。
-- **磁盘或内存缓存：** 内存默认阈值 512 MB，达到阈值停止并报错，停止或换源后释放。
-- **自动显示进度：** Kazumi 在前台时，收到有效投屏地址后自动打开模块页面，显示下载、转换进度与错误。
-- **四页界面：** 模块、投屏、设置与关于分别承载状态、处理进度、配置和项目信息，使用 miuix 页面动画与新应用图标。
-- **失败恢复：** 可手动重新处理；已生成有效 MP4 但时长偏短时，可选择强制投屏。
-- **后台保护：** 投屏期间续期 CPU 保活锁，提供系统电池优化豁免与后台运行设置入口。
-
-**设备发现与设备选择仍使用 Kazumi 原来的远程投屏菜单。** 本版本尚未提供模块独立设备列表。
+支持完整转换后投屏、边转换边投屏、HLS 并发下载、磁盘或内存缓存，以及失败重试和后台保护。界面分为 **模块、投屏、设置、关于** 四页，分别提供连接状态、处理进度、配置和项目信息。
 
 <a id="built-with"></a>
 
@@ -61,15 +50,13 @@ Kazumi 投屏桥是使用 **libxposed API 102** 的 LSPosed 模块，目标是�
 
 | 组件 | 用途 |
 | --- | --- |
-| [libxposed API 102](https://github.com/libxposed/api) | LSPosed Hook 与框架配置通道 |
-| [miuix](https://github.com/compose-miuix-ui/miuix) / Jetpack Compose | 模块设置与状态界面 |
+| [libxposed API 102](https://github.com/libxposed/api) | LSPosed Hook 与框架配置 |
+| [miuix](https://github.com/compose-miuix-ui/miuix) / Jetpack Compose | 设置与状态界面 |
 | [ShadowHook](https://github.com/bytedance/android-inline-hook) | 原生连接 Hook |
-| [FFmpegKit Full-GPL](https://github.com/sk3llo/ffmpeg_kit_flutter_android/tree/full-gpl) | 媒体探测、重新封装与转码 |
-| Kotlin / C++ | Android 服务、媒体缓存与原生内存输出 |
+| [FFmpegKit Full-GPL](https://github.com/sk3llo/ffmpeg_kit_flutter_android/tree/full-gpl) | 媒体探测、封装与转码 |
+| Kotlin / C++ | Android 服务、缓存与原生内存输出 |
 
 组件版本和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-<p align="right"><a href="#readme-top">返回顶部</a></p>
 
 <a id="getting-started"></a>
 
@@ -77,73 +64,59 @@ Kazumi 投屏桥是使用 **libxposed API 102** 的 LSPosed 模块，目标是�
 
 ### 使用条件
 
-- 已配置可使用 **API 102** 的 LSPosed 环境，模块作用域勾选 Kazumi。
-- Android 10 或以上、arm64-v8a；实际调试环境为 **小米 15 Pro / Android 16 / 官方 LSPosed 2.2.1 / Kazumi 2.3.8**，其他组合尚未完整验证。
+- Android 10 或以上、arm64-v8a，以及支持 **API 102** 的 LSPosed 环境；已调试组合见[兼容性与验证](#compatibility)。
 - DJI Goggles 2 开启无线串流，手机与眼镜连接同一局域网。
 
-### 安装
+### 安装与升级
 
 1. 从 [Release][release-url] 下载并安装 **1.1.0 签名 APK**，可覆盖安装旧版本。
 2. 在 LSPosed 中启用模块，将作用域设为 **Kazumi**。
 3. 完全退出并重新打开 Kazumi，使模块 Hook 生效。
 4. 打开模块，在 **设置** 页选择缓存与投屏模式，在 **投屏** 页点击 **开启服务**；允许通知和后台运行。
 
-升级前停止模块服务。覆盖安装后重新开启服务，并完全退出、重启 Kazumi；原生 Hook 不会热替换。
-
-<p align="right"><a href="#readme-top">返回顶部</a></p>
+升级前停止模块服务。覆盖安装后重新开启服务，并完全退出、重启 Kazumi，使新的原生 Hook 生效。
 
 <a id="usage"></a>
 
 ## 使用与设置
 
 1. 让眼镜停留在无线串流页面。
-2. 在 Kazumi 播放视频，点击 **远程投屏**，从原设备列表选择眼镜。
-3. 模块收到有效投屏地址后自动打开 **投屏** 页显示进度。Kazumi 已在后台或手机锁屏时，可点击模块服务通知打开页面。
-4. 需要缓存或转换时，完整模式等待处理完成后起播；兼容 MP4 且关闭缓存时可直接转发。结束时停止服务，按需清理磁盘缓存。
+2. 在 Kazumi 播放视频，点击 **远程投屏**，从设备列表选择眼镜。
+3. Kazumi 在前台时，模块收到有效投屏地址后自动打开 **投屏** 页显示进度；后台或锁屏时可点击服务通知查看。
+4. 结束投屏后停止服务，按需清理磁盘缓存。
 
-### 页面导航
+**关于** 页可手动检查更新和查看更新日志，点击时联网获取最新稳定版本；下载按钮在浏览器中打开 GitHub Release。
 
-| 页面 | 内容 |
-| --- | --- |
-| 模块 | 模块连接、服务与 Kazumi 接入状态，系统、框架和应用版本信息；绿色状态卡随系统切换深浅主题 |
-| 投屏 | 眼镜图标、处理状态、进度和日志，服务开关、打开 Kazumi、失败恢复，以及点击视频来源复制地址 |
-| 设置 | 投屏模式、并发、编码、缓存和请求头配置，缓存清理与后台保护入口 |
-| 关于 | 开发者头像与名称、检查更新、更新日志、问题反馈、参考项目与许可 |
-
-关于页仅在点击检查更新或更新日志时联网获取最新稳定版本；下载按钮打开 GitHub Release 页面，由浏览器完成下载。模块不在应用内下载或安装更新。
-
-### 设置说明
+### 设置
 
 设置变更在下一次投屏生效。
 
 | 设置 | 默认值 | 行为 |
 | --- | --- | --- |
-| 投屏模式 | 完整转换后投屏 | 生成完整 MP4 并检查音视频轨道时长，提供 HEAD / Range；边转换模式生成分片 MP4，兼容性取决于接收端 |
+| 投屏模式 | 完整转换后投屏 | 完整模式生成 MP4 并校验音视频轨道时长，支持 HEAD / Range；边转换模式生成分片 MP4，兼容性取决于接收端，生成期间不能任意拖动 |
 | 缓存 MP4 | 关闭 | 关闭时兼容 MP4 直接转发；开启后完整下载并校验再投屏 |
-| HLS 下载并发 | 4 路 | 可选 1 / 2 / 4 / 8 / 16 / 32 路，仅适用于完整模式的有限 HLS；来源限速时可降低并发 |
+| HLS 下载并发 | 4 路 | 可选 1 / 2 / 4 / 8 / 16 / 32 路，适用于完整模式的有限 HLS；直播、边转换模式和含 BYTERANGE 的 HLS 不启用并发预取 |
 | 缓存位置 | 磁盘 | 可切换内存；内存媒体不自动回退磁盘 |
-| 内存阈值 | 512 MB | 可选 64 / 128 / 256 / 512 / 1024 / 2048 MB；缓存分片、保存的清单与最终 MP4 共用预算，达到阈值停止报错 |
+| 内存阈值 | 512 MB | 可选 64 / 128 / 256 / 512 / 1024 / 2048 MB；分片、清单和最终 MP4 共用预算，达到阈值停止并报错 |
 
-HLS 清单在任务内保存并复用，正确解析相对分片、子清单、KEY / MAP，并沿用播放器的 Referer / Cookie / User-Agent；也可在模块中手工覆盖请求头。日志不输出请求头值或签名媒体地址。
+完整模式处理需要缓存或转换的视频时，先完成下载与封装再起播，等待时间取决于片长、网络与转码需求。来源限速时可降低 HLS 并发；缓存播放仍需手机与眼镜之间有稳定的局域网连接。
 
-停止或换源后释放任务内存；一般处理失败也会释放。仅时长偏短且仍有效的最终 MP4 会保留，供手动强制投屏使用，重试时替换该任务。磁盘缓存清理需先停止服务。内存按需分配，设备实际可用内存仍会影响可处理的视频大小。
+HLS 清单在任务内复用，解析相对分片、子清单与 KEY / MAP，保留分片顺序及加密信息。请求沿用播放器的 Referer / Cookie / User-Agent，也可在设置中覆盖；日志不输出请求头值或签名媒体地址。
 
-### 失败恢复与后台运行
+停止、换源或一般处理失败后释放任务内存；符合下述强制投屏条件的 MP4 会保留，重试时替换。内存按需分配，可处理的视频大小受设备可用内存限制。清理磁盘缓存前需停止服务。
 
-- **重试处理：** 投屏页发生错误后，使用当前配置和原来源请求头重新准备视频，并在准备完成后发送播放命令。过期来源仍需在 Kazumi 重新解析。
-- **强制投屏：** 仅在最终 MP4 可读取、全部必需音视频轨道具有有效时长，但比来源预估时长偏短时可用。它使用实际生成时长，视频可能缺少结尾；缺少轨道、文件不可读、缓存越限等错误不能被强制忽略。
-- **复制来源：** 点击投屏页的视频来源可复制完整地址。Android 13 及以上标记为敏感剪贴板内容；地址可能含鉴权参数，反馈问题前请脱敏。
-- **后台保护：** 活动投屏期间使用 2 小时 CPU 保活租期，每 30 分钟续期，停止或失败时释放。Android 10–13 额外使用 Wi-Fi 保活锁；Android 14 及以上跳过对息屏无效的 Wi-Fi 锁。
+### 故障处理与后台运行
 
-设置页的 **电池优化** 可申请系统豁免，**后台运行设置** 打开应用信息页；返回模块时刷新系统实际状态。仍需按手机系统设置允许后台运行，保活锁不能覆盖所有系统省电或厂商限制。
+| 情况 | 处理方式 |
+| --- | --- |
+| 处理失败 | 在投屏页点击 **重试处理**，使用当前配置与原来源请求头重新准备视频，完成后发送播放命令 |
+| 来源过期或请求失败 | 过期链接需在 Kazumi 重新解析；403 不自动重试，网络错误、429 和 5xx 有限重试，失败分片不会被跳过 |
+| MP4 时长偏短 | 默认拒绝投屏；仅当最终 MP4 可读取、全部必需音视频轨道时长有效，且短于来源预估时长时，可手动 **强制投屏**。按实际生成时长播放，可能缺少结尾；缺失轨道、文件不可读或缓存越限等错误不能强制忽略 |
+| 找不到眼镜 | 设备发现由 Kazumi 提供，存在偶发无法列出眼镜的问题；模块暂无独立设备列表或手动 IP 入口 |
 
-### 使用限制
+点击投屏页的视频来源可复制完整地址；Android 13 及以上将其标记为敏感剪贴板内容。地址可能包含鉴权参数，分享前请脱敏。
 
-- 对需要缓存或转换的有限视频，完整模式需先完成下载与封装，起播等待时间取决于片长、网络与是否需要转码。
-- 直播、边转换模式及含 BYTERANGE 的 HLS 不启用上述并发预取。边转换模式生成期间不支持任意拖动。
-- 缓存减少对来源网络的持续依赖；手机到眼镜之间仍需稳定的局域网连接。
-- 过期链接需在 Kazumi 重新解析；403 不自动重试，网络错误、429 和 5xx 仅有限重试。失败分片不会被跳过，时长明显偏短的完整输出默认拒绝，符合上述条件时可手动强制投屏。
-- 眼镜偶发无法出现在 Kazumi 设备列表中的问题仍存在；模块当前没有独立发现或手动 IP 入口。
+在设置页通过 **电池优化** 申请系统豁免，通过 **后台运行设置** 打开应用信息页并允许后台运行。活动投屏期间，CPU 保活锁采用 2 小时租期、每 30 分钟续期，停止或失败时释放；Android 10–13 额外使用 Wi-Fi 保活锁。系统和厂商的省电策略仍可能限制后台运行。
 
 停用模块并重启 Kazumi，可恢复原投屏流程。
 
@@ -153,19 +126,20 @@ HLS 清单在任务内保存并复用，正确解析相对分片、子清单、K
 
 ## 兼容性与验证
 
-当前发布版本为 **1.1.0 / versionCode 14**。发布包仅包含 arm64-v8a，原生库兼容 16 KiB 页面。
+当前发布版本为 **1.1.0 / versionCode 14**，原生库兼容 16 KiB 页面。已调试环境为 **小米 15 Pro / Android 16 / 官方 LSPosed 2.2.1 / Kazumi 2.3.8 / DJI Goggles 2**；其他组合尚未完整验证。
 
-| 范围 | 已观察的结果 |
+以下为发布检查与既有测试记录：
+
+| 范围 | 结果与测试条件 |
 | --- | --- |
-| 构建与检查 | 1.1.0 Release 构建、Lint 通过 |
-| 核心回归 | 72 项核心 / 媒体回归通过，覆盖缓存、并发和必需轨道时长校验 |
-| 本轮新增功能 | 用户已手动检查本轮新增功能 |
-| 真机缓存 | 原生内存读写、越限中止、HLS 内存转换、MP4 缓存开 / 关、磁盘缓存、HEAD / Range、停止后释放均通过 |
-| 实际接收端 | 眼镜播放内存中的合成 H.264 / 双声道 AAC 视频，用户确认画面与声音正常 |
+| 构建与回归 | 1.1.0 Release 构建、Lint 和 72 项核心 / 媒体回归通过，覆盖缓存、并发和必需轨道时长校验 |
+| 真机缓存 | 原生内存读写、越限中止、HLS 内存转换、MP4 缓存开 / 关、磁盘缓存、HEAD / Range、停止后释放通过；HLS 使用小型单分片视频与 32 路配置 |
+| 并发峰值 | 16 / 32 路实际峰值通过电脑 HTTP 测试验证 |
+| 眼镜播放 | 内存中的合成 H.264 / 双声道 AAC 视频，用户确认画面与声音正常 |
 | 自动打开页面 | 真机调试入口验证立即跳转、同一请求不重复跳转、后台不抢占页面、取消后不重放 |
-| 来源反馈 | 用户确认 Sorani 多线程下载可用；这不代表所有来源或整集播放均已验证 |
+| 来源反馈 | 用户确认 Sorani 多线程下载可用 |
 
-上述真机缓存、接收端与自动打开页面结果来自先前验证。真机 HLS 缓存测试使用小型单分片视频与 32 路配置，实际 16 / 32 路峰值并发由电脑 HTTP 测试验证。自动跳转本轮未另做真实来源的整集投屏验证。HEVC 10 位整集重编码、锁屏长时间运行和边转换模式在眼镜上的播放仍需补测。
+待验证场景包括真实来源的整集投屏与自动跳转、HEVC 10 位整集重编码、锁屏长时间运行，以及边转换模式在眼镜上的播放。
 
 <a id="building"></a>
 
@@ -181,17 +155,15 @@ HLS 清单在任务内保存并复用，正确解析相对分片、子清单、K
 | NDK / CMake | r27c（27.2.12479018）/ 3.22.1 |
 | 电脑媒体测试 | PATH 中可用的 FFmpeg / FFprobe |
 
-克隆仓库并切换到本次发布的源码版本：
-
 ```powershell
 git clone https://github.com/oneringr/kazumi-broadcast-bridge.git
 cd kazumi-broadcast-bridge
 git checkout v1.1.0
 ```
 
-配置 `JAVA_HOME` 指向 JDK 21，在本地 `local.properties` 中填写 Android SDK 与 CMake 路径，并接受所需 SDK 许可证。当前 Gradle 固定使用 `tools/runtime/android-ndk-r27c/`，需要自行将 NDK r27c 解压到该目录；本地工具目录不会随源码分发。
+配置 `JAVA_HOME` 指向 JDK 21，在 `local.properties` 中填写 Android SDK 与 CMake 路径，并接受所需 SDK 许可证。将 NDK r27c 解压到 Gradle 固定使用的 `tools/runtime/android-ndk-r27c/`，本地工具需自行准备。
 
-签名使用自己的 `sign-key.jks` 与 `config.txt`，放在仓库外，通过 `KAZUMI_SIGNING_DIR` 指定目录。配置文件内容为：
+将自己的 `sign-key.jks` 与 `config.txt` 放在仓库外，通过 `KAZUMI_SIGNING_DIR` 指定目录。`config.txt` 内容：
 
 ```properties
 storePassword=YOUR_STORE_PASSWORD
@@ -204,15 +176,15 @@ $env:KAZUMI_SIGNING_DIR = "D:/android-signing"
 .\gradlew.bat :core:test :app:assembleRelease :app:lintRelease
 ```
 
-产物位于 `app/build/outputs/apk/release/`。只构建 APK 可执行 `:app:assembleRelease :app:lintRelease`，这不表示媒体测试通过。使用自己的签名构建时，无法直接覆盖本项目发布包。
+`:core:test` 运行核心与媒体测试；`:app:assembleRelease :app:lintRelease` 构建并检查 APK。产物位于 `app/build/outputs/apk/release/`。自己的签名与发布包不同，无法直接覆盖安装。
 
 | 路径 | 职责 |
 | --- | --- |
-| `app/` | API 102 入口、原生 Hook、Android 服务、媒体输出与 miuix 界面 |
+| `app/` | API 102 入口、原生 Hook、Android 服务、媒体输出与界面 |
 | `core/` | HTTP / SOAP、媒体策略、任务状态、HLS 快照、缓存与电脑测试 |
-| `app/src/debug/` | 真机测试入口，发布 APK 不包含这些入口 |
+| `app/src/debug/` | 真机测试入口，仅用于调试构建 |
 
-`docs/`、`tools/`、签名材料、来源媒体、调试日志、附件和构建产物均不提交；APK 通过 Release 分发。
+`docs/`、`tools/`、签名材料、来源媒体、日志、附件和构建产物保留在本地；APK 通过 Release 分发。
 
 <p align="right"><a href="#readme-top">返回顶部</a></p>
 
@@ -220,31 +192,22 @@ $env:KAZUMI_SIGNING_DIR = "D:/android-signing"
 
 ## 路线图
 
-- [x] 兼容 MP4 转发、HLS 封装与必要时转码。
-- [x] HLS 清单复用、16 / 32 路并发与取消竞争修复。
-- [x] MP4 可选缓存、磁盘 / 内存切换与内存阈值。
-- [x] 收到有效投屏地址后自动显示模块进度页。
-- [x] 四页 miuix 界面、页面动画、新图标与关于页更新入口。
-- [x] 失败重试、有效 MP4 时长偏短时手动强制投屏与来源复制。
-- [x] 投屏活动期间保活锁续期、系统电池优化豁免与后台设置入口。
-- [ ] 评估可靠的投屏按钮入口与模块独立设备页，补充设备发现和播放控制。
-- [ ] 补测更多 HLS 来源、整集转码、断网 / 换集、锁屏长时间运行与边转换兼容性。
-
-独立接管投屏的按钮 Hook 开发目前暂停，上述待办不属于已发布功能。问题与建议可通过 [Issues][issues-url] 提交。
+- [ ] 评估独立投屏入口、设备页和播放控制；按钮 Hook 开发目前暂停。
+- [ ] 扩展 HLS 来源、整集转码、断网 / 换集、锁屏运行与边转换兼容性测试。
 
 <a id="contributing"></a>
 
 ## 参与贡献
 
-欢迎提交问题或 Pull Request。报告问题时请提供手机型号、Android / LSPosed / Kazumi / 模块版本、缓存与并发设置、复现步骤，以及去除敏感信息的日志；请勿公开 Cookie、签名媒体链接或签名密钥。
+通过 [Issues][issues-url] 报告问题时，请提供手机型号、Android / LSPosed / Kazumi / 模块版本、缓存与并发设置、复现步骤及脱敏日志。请勿公开 Cookie、签名媒体链接或签名密钥。
 
-开发贡献请从 Fork 的功能分支发起 Pull Request，说明行为变化和验证结果。缓存与协议改动应运行相关核心测试；Android 或原生媒体改动应说明真机验证范围。
+代码贡献请从 Fork 的功能分支发起 Pull Request，说明行为变化和验证结果。缓存与协议改动应运行相关核心测试；Android 或原生媒体改动应说明真机验证范围。
 
 <a id="license"></a>
 
 ## 许可
 
-项目源码采用 **GPL-3.0**，见 [LICENSE](LICENSE)。APK 使用 FFmpegKit Full-GPL 后端；第三方组件保留各自许可，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+源码采用 **GPL-3.0**，见 [LICENSE](LICENSE)。APK 使用 FFmpegKit Full-GPL 后端；第三方组件保留各自许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 <a id="acknowledgments"></a>
 
@@ -252,7 +215,7 @@ $env:KAZUMI_SIGNING_DIR = "D:/android-signing"
 
 项目维护与讨论通过 [GitHub 仓库](https://github.com/oneringr/kazumi-broadcast-bridge) 和 [Issues][issues-url] 进行。
 
-感谢 [Kazumi](https://github.com/Predidit/Kazumi)、[libxposed](https://github.com/libxposed)、[miuix](https://github.com/compose-miuix-ui/miuix)、[ShadowHook](https://github.com/bytedance/android-inline-hook) 与 FFmpeg 生态提供的基础组件。本 README 的结构参考 [Best-README-Template](https://github.com/othneildrew/Best-README-Template)。
+感谢 [Kazumi](https://github.com/Predidit/Kazumi)、[libxposed](https://github.com/libxposed)、[miuix](https://github.com/compose-miuix-ui/miuix)、[ShadowHook](https://github.com/bytedance/android-inline-hook) 与 FFmpeg 生态。本 README 的结构参考 [Best-README-Template](https://github.com/othneildrew/Best-README-Template)。
 
 <p align="right"><a href="#readme-top">返回顶部</a></p>
 
